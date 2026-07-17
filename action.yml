@@ -1,8 +1,5 @@
 name: 'Zablo — zero-knowledge secrets'
-description: >
-  Install the Zablo CLI and inject zero-knowledge secrets into subsequent
-  workflow steps. Prefers GitHub OIDC federation (no long-lived API keys)
-  and falls back to a static vk_… API key when OIDC isn't available.
+description: 'Fetch zero-knowledge secrets into GitHub Actions via OIDC federation. No long-lived API keys, auto log masking.'
 author: 'Zablo'
 
 branding:
