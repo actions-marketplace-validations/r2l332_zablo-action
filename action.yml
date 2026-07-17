@@ -1,0 +1,157 @@
+name: 'Zablo — zero-knowledge secrets'
+description: >
+  Install the Zablo CLI and inject zero-knowledge secrets into subsequent
+  workflow steps. Prefers GitHub OIDC federation (no long-lived API keys)
+  and falls back to a static vk_… API key when OIDC isn't available.
+author: 'Zablo'
+
+branding:
+  icon: shield
+  color: purple
+
+inputs:
+  api-url:
+    description: 'Zablo server URL (e.g. https://zablo.acme.com)'
+    required: true
+  passphrase:
+    description: >
+      Client-side encryption passphrase. Never sent to the server.
+      Required only when `secrets` is provided.
+    required: false
+  api-key:
+    description: >
+      Long-lived API key (starts with `vk_`). If unset AND `secrets` is
+      provided, the action will federate an OIDC token via GitHub's
+      built-in ID token service. Recommended: leave blank and use OIDC.
+    required: false
+  audience:
+    description: 'OIDC audience passed to the ID token service and Zablo federate endpoint.'
+    default: 'zablo.io'
+    required: false
+  version:
+    description: 'zablo-cli version to install (`latest`, or a PEP440 spec like `==0.4.0`).'
+    default: 'latest'
+    required: false
+  secrets:
+    description: >
+      Newline-separated list of `NAME=path` pairs. Each value is fetched
+      via `zablo get <path>`, masked in the log, and exported to
+      $GITHUB_ENV so subsequent steps can use `$NAME`. Empty = install
+      the CLI only.
+    required: false
+
+outputs:
+  cli-version:
+    description: 'Installed zablo-cli version'
+    value: ${{ steps.install.outputs.version }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install zablo-cli
+      id: install
+      shell: bash
+      run: |
+        set -euo pipefail
+        if ! command -v pipx >/dev/null 2>&1; then
+          python3 -m pip install --user pipx >/dev/null
+          python3 -m pipx ensurepath >/dev/null
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        fi
+        SPEC="zablo-cli"
+        if [[ "${{ inputs.version }}" != "latest" ]]; then
+          # accept "0.4.0" or "==0.4.0"
+          v="${{ inputs.version }}"
+          [[ "$v" == ==* ]] || v="==$v"
+          SPEC="zablo-cli$v"
+        fi
+        pipx install --force "$SPEC" >/dev/null
+        installed=$(zablo version)
+        echo "::notice title=Zablo::installed zablo-cli $installed"
+        echo "version=$installed" >> "$GITHUB_OUTPUT"
+
+    - name: Federate via OIDC
+      id: federate
+      if: inputs.api-key == '' && inputs.secrets != ''
+      shell: bash
+      env:
+        ACTIONS_ID_TOKEN_REQUEST_TOKEN: ${{ env.ACTIONS_ID_TOKEN_REQUEST_TOKEN }}
+        ACTIONS_ID_TOKEN_REQUEST_URL: ${{ env.ACTIONS_ID_TOKEN_REQUEST_URL }}
+      run: |
+        set -euo pipefail
+        if [[ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]]; then
+          echo "::error::No OIDC token available. Add 'permissions: { id-token: write }' to your job, or pass 'api-key'."
+          exit 1
+        fi
+        # 1. Mint the GitHub OIDC JWT
+        JWT=$(curl -sSf \
+          -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+          "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=${{ inputs.audience }}" \
+          | python3 -c 'import sys,json;print(json.load(sys.stdin)["value"])')
+        # 2. Exchange for a Zablo session (vks_…)
+        SESSION=$(ZABLO_API_URL="${{ inputs.api-url }}" \
+          zablo federate --subject-token "$JWT" --audience "${{ inputs.audience }}" --export \
+          | sed -n 's/^export ZABLO_API_KEY=//p')
+        if [[ -z "$SESSION" ]]; then
+          echo "::error::Federation succeeded but no session token was returned."
+          exit 1
+        fi
+        echo "::add-mask::$SESSION"
+        echo "session=$SESSION" >> "$GITHUB_OUTPUT"
+        echo "::notice title=Zablo::federated via OIDC (session prefix ${SESSION:0:12}…)"
+
+    - name: Fetch and inject secrets
+      if: inputs.secrets != ''
+      shell: bash
+      env:
+        ZABLO_API_URL: ${{ inputs.api-url }}
+        ZABLO_PASSPHRASE: ${{ inputs.passphrase }}
+        # Prefer static api-key; else use the freshly-federated session key.
+        ZABLO_API_KEY: ${{ inputs.api-key != '' && inputs.api-key || steps.federate.outputs.session }}
+      run: |
+        set -euo pipefail
+        if [[ -z "${ZABLO_PASSPHRASE:-}" ]]; then
+          echo "::error::'passphrase' is required when 'secrets' is set."
+          exit 1
+        fi
+        if [[ -z "${ZABLO_API_KEY:-}" ]]; then
+          echo "::error::No API key available (federation failed and 'api-key' not provided)."
+          exit 1
+        fi
+
+        count=0
+        while IFS= read -r raw; do
+          line="${raw%%#*}"                      # strip comments
+          line="$(echo "$line" | xargs || true)" # trim
+          [[ -z "$line" ]] && continue
+          if [[ "$line" != *"="* ]]; then
+            echo "::warning::skipping malformed entry (no '='): $raw"
+            continue
+          fi
+          name="${line%%=*}"
+          path="${line#*=}"
+          name="$(echo "$name" | xargs)"
+          path="$(echo "$path" | xargs)"
+
+          value="$(zablo get "$path")"
+
+          # Mask every non-empty line of the value so multi-line secrets
+          # (e.g. PEM keys) are still redacted from logs.
+          while IFS= read -r chunk; do
+            [[ -n "$chunk" ]] && echo "::add-mask::$chunk"
+          done <<< "$value"
+
+          # Multi-line-safe write to $GITHUB_ENV
+          delim="ZABLO_EOF_$(openssl rand -hex 8)"
+          {
+            printf '%s<<%s\n' "$name" "$delim"
+            printf '%s\n' "$value"
+            printf '%s\n' "$delim"
+          } >> "$GITHUB_ENV"
+
+          count=$((count+1))
+          echo "  ✓ injected $name  (from $path)"
+        done <<< "${{ inputs.secrets }}"
+
+        echo "::notice title=Zablo::injected $count secret(s) into \$GITHUB_ENV"

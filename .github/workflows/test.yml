@@ -1,0 +1,59 @@
+name: Self-test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  install-only:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install zablo-cli only
+        id: zablo
+        uses: ./
+        with:
+          # api-url is required but unused in install-only mode
+          api-url: https://example.invalid
+      - name: Verify CLI works
+        run: |
+          which zablo
+          zablo version
+          zablo --help | grep -q "configure"
+      - name: Show installed version output
+        run: echo "installed = ${{ steps.zablo.outputs.cli-version }}"
+
+  version-pin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./
+        with:
+          api-url: https://example.invalid
+          version: '0.4.0'
+      - name: Verify pinned version
+        run: |
+          got=$(zablo version)
+          [[ "$got" == "0.4.0" ]] || { echo "expected 0.4.0, got $got" >&2; exit 1; }
+
+  # End-to-end test with OIDC federation is intentionally omitted here
+  # because it requires a reachable Zablo server + a matching OIDC binding
+  # bound to this repo. Enable when secrets are wired:
+  #
+  # oidc-federate:
+  #   runs-on: ubuntu-latest
+  #   permissions:
+  #     id-token: write
+  #     contents: read
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: ./
+  #       with:
+  #         api-url: ${{ secrets.ZABLO_TEST_URL }}
+  #         passphrase: ${{ secrets.ZABLO_TEST_PASSPHRASE }}
+  #         secrets: |
+  #           HELLO=test/greeting
+  #     - name: Assert value present
+  #       run: '[[ -n "$HELLO" ]]'

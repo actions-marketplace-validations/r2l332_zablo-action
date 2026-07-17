@@ -1,0 +1,41 @@
+# Full example: OIDC federation → fetch secrets → deploy
+#
+# Copy this into .github/workflows/ in your own repo and adjust api-url + paths.
+# The only GitHub secret you need is ZABLO_PASSPHRASE.
+
+name: Deploy to production
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write        # required — the runner mints an OIDC JWT
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch secrets from Zablo
+        uses: r2l332/zablo-action@v1
+        with:
+          api-url: https://zablo.example.com
+          passphrase: ${{ secrets.ZABLO_PASSPHRASE }}
+          secrets: |
+            # Comments and blank lines are fine
+            DATABASE_URL=prod/db/url
+            REDIS_URL=prod/redis/url
+            STRIPE_KEY=prod/stripe/live-key
+            JWT_SIGNING_KEY=prod/jwt/session-signing
+
+      - name: Run migrations
+        run: ./scripts/migrate.sh
+        # $DATABASE_URL now populated
+
+      - name: Deploy application
+        run: ./scripts/deploy.sh
+        # All four secrets available as env vars
