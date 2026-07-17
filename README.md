@@ -1,5 +1,6 @@
 # Zablo GitHub Action
 
+[![Marketplace](https://img.shields.io/badge/GitHub%20Marketplace-Zablo-8b5cf6?logo=github)](https://github.com/marketplace/actions/zablo-zero-knowledge-secrets)
 [![PyPI](https://img.shields.io/pypi/v/zablo-cli.svg)](https://pypi.org/project/zablo-cli/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
